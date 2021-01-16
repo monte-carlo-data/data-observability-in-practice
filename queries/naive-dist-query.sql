@@ -1,3 +1,5 @@
+.headers on
+
 WITH NULL_RATES AS(
   SELECT
     DATE_ADDED,
