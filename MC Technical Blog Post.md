@@ -269,7 +269,7 @@ FROM
 WHERE
   AVG_TEMP_NULL_RATE - TWO_WEEK_ROLLING_AVG > 0.3;
 ___
-$ sqlite3 EXOPLANETS.db < queries/dist-query-rolling-avg.sql
+$ sqlite3 EXOPLANETS.db < queries/dist-query-rolling-avg.sql              
 DATE_ADDED|AVG_TEMP_NULL_RATE|TWO_WEEK_ROLLING_AVG
 2020-03-09|0.967391304347826|0.436077995611105
 2020-06-02|0.929411764705882|0.441299602441599
@@ -284,6 +284,103 @@ DATE_ADDED|AVG_TEMP_NULL_RATE|TWO_WEEK_ROLLING_AVG
 ## Schema
 
 Lastly, how do we build a schema detector? Schema changes can be important for root cause analysis, which differentiates observability from mere monitoring.
-==TODO add new dbs for updated schema and an `EXOPLANETS_SCHEMA` table to query==
 
-## Lineage
+For this, we need to be collecting additional data. `EXOPLANETS` contains data collected from 2020-01-01 to 2020-07-18. For this exercise, we need to use `EXOPLANETS_EXTENDED`, which contains additional data through 2020-09-06:
+
+```
+sqlite> SELECT DATE_ADDED FROM EXOPLANETS_EXTENDED ORDER BY DATE_ADDED DESC LIMIT 1;
+2020-09-06
+```
+
+`EXOPLANETS_EXTENDED` also contains additional fields from our upgraded measurement instruments. Now, we can record a planet's orbital `ECCENTRICITY` as well as `ATMOSPHERE`:
+
+```
+sqlite> PRAGMA TABLE_INFO(EXOPLANETS_EXTENDED);
+0|_ID|VARCHAR(16777216)|1||0
+1|DISTANCE|FLOAT|0||0
+2|G|FLOAT|0||0
+3|ORBITAL_PERIOD|FLOAT|0||0
+4|AVG_TEMP|FLOAT|0||0
+5|DATE_ADDED|TIMESTAMP_NTZ(6)|1||0
+6|ECCENTRICITY|FLOAT|0||0
+7|ATMOSPHERE|VARCHAR(16777216)|0||0
+```
+
+Note that old data inherited from the `EXOPLANETS` table has `NULL` values for these new fields, since they weren't recorded at the time:
+
+```
+sqlite> SELECT * FROM EXOPLANETS_EXTENDED LIMIT 10;
+c168b188-ef0c-4d6a-8cb2-f473d4154bdb|34.6273036348341||476.480044083599||2020-01-01||
+e7b56e84-41f4-4e62-b078-01b076cea369|110.196919810563|2.52507362359066|839.8378167897||2020-01-01||
+a27030a0-e4b4-4bd7-8d24-5435ed86b395|26.6957950454452|10.2764970016067|301.018816321399||2020-01-01||
+54f9cf85-eae9-4f29-b665-855357a14375|54.8883521129783||173.788967912197|328.644125249613|2020-01-01||
+4d06ec88-f5c8-4d03-91ef-7493a12cd89e|153.264217159834|0.922874568459221|200.712661803056||2020-01-01||
+e16250b8-2d9d-49f3-aaef-58eed9a8864c|7.45481105106914|5.50370062865931|763.561710364529|245.129284804415|2020-01-01||
+a0a6bf97-90d5-4686-8ccb-10753f8d335e|4.92594574736505|0.953472628929756|486.053322958314|267.786556952489|2020-01-01||
+b28b4e19-8517-4ab5-97f0-c445f1aae6c4|94.5401733502596|7.1182538365368|629.287425534383|368.859205765934|2020-01-01||
+7e34e44e-663f-491c-96c5-bb5acb8d5f1e|19.7862549078169|3.99908060568442|744.106326058419|180.445028908153|2020-01-01||
+305e8ea0-663b-4311-b6b3-4198c051c335|95.6540298943424|0.677211945635685|472.34444663503||2020-01-01||
+```
+
+How can we find the *exact date* when our `EXOPLANETS` data had schema additions? For this, we need historical metadata, which we thankfully have through the table `EXOPLANETS_SCHEMA`:
+
+```
+sqlite> PRAGMA TABLE_INFO(EXOPLANETS_SCHEMA);
+0|date|TEXT|0||0
+1|schema|TEXT|0||0
+```
+
+For every date where data is recorded, this table contains the output of the `PRAGMA TABLE_INFO(EXOPLANETS_EXTENDED);` command:
+
+```
+sqlite> SELECT * FROM EXOPLANETS_SCHEMA LIMIT 1;
+2020-01-01|[
+    (0, '_id', 'TEXT', 0, None, 0),
+    (1, 'distance', 'REAL', 0, None, 0),
+    (2, 'g', 'REAL', 0, None, 0),
+    (3, 'orbital_period', 'REAL', 0, None, 0),
+    (4, 'avg_temp', 'REAL', 0, None, 0),
+    (5, 'date_added', 'TEXT', 0, None, 0)
+  ]
+```
+
+With a table like this, it's straightforward to write a query acting as a *schema-change detector*: just compare each day's schema to the day previous!
+
+```
+WITH CHANGES AS(
+  SELECT
+    DATE,
+    SCHEMA AS NEW_SCHEMA,
+    LAG(SCHEMA) OVER(ORDER BY DATE) AS PAST_SCHEMA
+  FROM
+    EXOPLANETS_SCHEMA
+)
+
+SELECT
+  *
+FROM
+  CHANGES
+WHERE
+  NEW_SCHEMA != PAST_SCHEMA
+ORDER BY
+  DATE ASC;
+___
+DATE|NEW_SCHEMA|PAST_SCHEMA
+2020-07-19|[
+    (0, '_id', 'TEXT', 0, None, 0),
+    (1, 'distance', 'REAL', 0, None, 0),
+    (2, 'g', 'REAL', 0, None, 0),
+    (3, 'orbital_period', 'REAL', 0, None, 0),
+    (4, 'avg_temp', 'REAL', 0, None, 0),
+    (5, 'date_added', 'TEXT', 0, None, 0),
+    (6, 'eccentricity', 'REAL', 0, None, 0),
+    (7, 'atmosphere', 'TEXT', 0, None, 0)
+  ]|[
+    (0, '_id', 'TEXT', 0, None, 0),
+    (1, 'distance', 'REAL', 0, None, 0),
+    (2, 'g', 'REAL', 0, None, 0),
+    (3, 'orbital_period', 'REAL', 0, None, 0),
+    (4, 'avg_temp', 'REAL', 0, None, 0),
+    (5, 'date_added', 'TEXT', 0, None, 0)
+  ]
+```
